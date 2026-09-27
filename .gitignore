@@ -1,0 +1,6 @@
+xim_rime
+*.o
+xim_rime.dSYM
+*.bak.c
+*.bak.h
+*.entitlements
