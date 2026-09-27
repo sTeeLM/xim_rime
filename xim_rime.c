@@ -14,6 +14,7 @@
 #include <xcb/xcb_aux.h>
 #include <xcb/xcb_keysyms.h>
 #include <xcb/xproto.h>
+#include <uthash.h> 
 
 #define XIM_RIME_VERSION_STRING    "1.0.0"
 #define XIM_RIME_XIM_NAME          "xim_rime"
@@ -22,17 +23,25 @@
 #define XIM_RIME_DISTRIBUTION_CODE_NAME "FuckME"
 #define XIM_RIME_DISTRIBUTION_VERSION XIM_RIME_VERSION_STRING 
 
+// 每窗口的session
+typedef struct _IMClientSession {
+    UT_hash_handle hh;
+    xcb_im_client_t * client;
+    RimeSessionId rime_session_id;
+} IMClientSession;
+
+
 // 定义输入法全局状态
-typedef struct _IMServerState{
+typedef struct _IMServerState {
     xcb_connection_t *conn;
     xcb_window_t win_candidate; // 候选词窗口 ID
     xcb_gcontext_t gc;          // 绘制上下文
     RimeApi* rime_api;          // Rime API
     RimeTraits rime_traits;     // Rime Traits
-    RimeSessionId rime_session_id; 
+    IMClientSession * sessions;
+    xcb_key_symbols_t *key_symbols;
     bool is_active;
 } IMServerState;
-
 
 /* options descriptor */
 static struct option longopts[] = {
@@ -103,7 +112,7 @@ static void rime_notification_handler(void *context,
     log_printf("%s %s", message_type, message_value);
 }
 
-static void server_state_init()
+static void rime_state_init()
 {
     server_state.rime_api = rime_get_api();
 
@@ -125,14 +134,21 @@ static void server_state_init()
     server_state.rime_api->set_notification_handler(rime_notification_handler, &server_state);
     server_state.rime_api->start_maintenance(true);
     server_state.rime_api->join_maintenance_thread();
-    server_state.rime_session_id = server_state.rime_api->create_session();
-    
 }
 
-static void server_state_destroy()
+static void rime_state_destroy()
 {
+    IMClientSession *entry, *tmp;
     if(server_state.rime_api) {
+        HASH_ITER(hh, server_state.sessions, entry, tmp) {
+            log_printf("Free session ID: %d for Client %p\n", entry->rime_session_id, entry->client);
+            HASH_DEL(server_state.sessions, entry);
+            server_state.rime_api->destroy_session(entry->rime_session_id);
+            free(entry);
+        }
         server_state.rime_api->finalize();
+        server_state.rime_api = NULL;
+        server_state.sessions = NULL;
     }
 }
 
@@ -170,7 +186,7 @@ int32_t rime_sync()
 {
     int32_t ret_value = 0;
 
-    server_state_init();
+    rime_state_init();
     
     log_printf("正在启动同步任务... ");
 
@@ -195,7 +211,7 @@ int32_t rime_sync()
     
 error:
     // 释放环境
-    server_state_destroy();
+    rime_state_destroy();
     return ret_value;
 
 }
@@ -206,65 +222,104 @@ int32_t rime_deplay()
     int32_t ret_value = 0;
 
     log_printf("正在启动部署任务...");    
-    server_state_init();
-    server_state_destroy();
+    rime_state_init();
+    rime_state_destroy();
+    log_printf("部署完成");    
     return ret_value;
 }
 
 void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
               const xcb_im_packet_header_fr_t *hdr, void *frame, void *arg,
-              void *user_data) {
-/*
+              void *user_data)
+{
+
     IMServerState *state = (IMServerState *)user_data;
+    IMClientSession *session = NULL;
+    xcb_key_press_event_t *event = arg;
     
-    if (hdr->major_opcode == XCB_XIM_DISCONNECT) {
-        // end = true;
+    // 尝试获取client session
+    HASH_FIND_PTR(state->sessions, &client, session);
+
+    // 如果是新连接，动态创建 Session 并存入管理器
+    if(!session && hdr->major_opcode != XCB_XIM_DISCONNECT) {
+        session = malloc(sizeof(IMClientSession));
+        memset(session, 0, sizeof(IMClientSession));
+        session->rime_session_id = state->rime_api->create_session();
+        session->client = client;
+        HASH_ADD_PTR(state->sessions, client, session);
+        log_printf("new session %lu for client %p", session->rime_session_id, client);
     }
 
-    if (hdr->major_opcode == XCB_XIM_FORWARD_EVENT) {
-        xcb_key_press_event_t *event = arg;
-        xcb_key_symbols_t *key_symbols = xcb_key_symbols_alloc(state->conn);
-        xcb_keysym_t sym = xcb_key_symbols_get_keysym(key_symbols, event->detail, 0);
-        xcb_key_symbols_free(key_symbols);
+    // 删除Session
+    if (hdr->major_opcode == XCB_XIM_DISCONNECT) {
+        if (session) {
+            log_printf("delete session id %lu for %p\n", session->rime_session_id, session->client);
+            HASH_DEL(state->sessions, session);
+            state->rime_api->destroy_session(session->rime_session_id);            
+            free(session);
+        }
+    // 正常打字，将字符流灌入输入法引擎
+    } else if (hdr->major_opcode == XCB_XIM_FORWARD_EVENT && session) {
+        char * result = NULL;
+        size_t result_len;
+        RimeCommit commit;
+        RimeContext context;
+        int rime_mask = 0;
+        xcb_key_symbols_t *key_symbols = state->key_symbols;
+        xcb_keysym_t keycode =
+            xcb_key_symbols_get_keysym(key_symbols, event->detail, 0);
 
-        // 检测系统发来的激活或关闭通知（在底层被触发键拦截后，XIM 框架会更新状态）
-        // 这里我们可以通过显式拦截特定按键或根据框架协议状态管理激活
+        if (event->state & XCB_MOD_MASK_SHIFT)   rime_mask |= (1 << 0);
+        if (event->state & XCB_MOD_MASK_LOCK)    rime_mask |= (1 << 1);
+        if (event->state & XCB_MOD_MASK_CONTROL) rime_mask |= (1 << 2);
+        if (event->state & XCB_MOD_MASK_1)       rime_mask |= (1 << 3); // 通常对应 Alt/Option 键
+        if (event->state & XCB_MOD_MASK_4)       rime_mask |= (1 << 6); // 通常对应 Super/Command 键
         
-        // 核心打字输入拦截逻辑
-        if (sym >= 'a' && sym <= 'z') {
-            state->is_active = true; // 临时强制假设已进入激活状态用于展示
-            if (state->pinyin_len < sizeof(state->pinyin_buffer) - 1) {
-                state->pinyin_buffer[state->pinyin_len++] = (char)sym;
-                state->pinyin_buffer[state->pinyin_len] = '\0';
-            }
-            draw_candidate_window(state);
-        } 
-        // 用户按下数字键 1 提交第一个候选词
-        else if (sym == '1' && state->pinyin_len > 0) {
-            const char *commit_text = "测试"; // 模拟选中第一个词提交
-            if (strcmp(state->pinyin_buffer, "nihao") == 0) commit_text = "你好";
+        if(state->rime_api->process_key(session->rime_session_id, keycode, rime_mask)) {
 
-            size_t len;
-            char *result = xcb_utf8_to_compound_text(commit_text, strlen(commit_text), &len);
-            xcb_im_commit_string(im, ic, XCB_XIM_LOOKUP_CHARS, result, len, 0);
-            free(result);
+            RIME_STRUCT_INIT(RimeCommit, commit); // 正确初始化结构体
 
-            // 提交后清空缓冲区并隐藏窗口
-            state->pinyin_len = 0;
-            state->pinyin_buffer[0] = '\0';
-            draw_candidate_window(state);
-        }
-        // 用户按下 BackSpace 退格键
-        else if (sym == XK_BackSpace && state->pinyin_len > 0) {
-            state->pinyin_buffer[--state->pinyin_len] = '\0';
-            draw_candidate_window(state);
-        }
-        // 其他控制键，放行给客户端
-        else {
+            // get_commit 如果返回 True，说明上屏文本已经 Ready！
+            if (state->rime_api->get_commit(session->rime_session_id, &commit)) {
+        
+                // 此时文本已 Ready，你可以拿去输出到你的目标文本框中
+                log_printf("【上屏文本 Ready】: %s", commit.text);
+                result = xcb_utf8_to_compound_text(commit.text,
+                                                   strlen(commit.text), &result_len);
+                xcb_im_commit_string(im, ic, XCB_XIM_LOOKUP_CHARS, result, result_len, 0);
+                // 记得释放内存！
+                free(result);
+                state->rime_api->free_commit(&commit);
+            } else {
+                RIME_STRUCT_INIT(RimeContext, context);
+                // 上屏文本没有 Ready，说明用户还在继续输入（组合编码阶段）
+                // 此时你可以去 get_context 获取当前的预编辑文字（Preedit）和候选词列表
+                if (state->rime_api->get_context(session->rime_session_id, &context)) {
+                    if (context.composition.preedit) {
+                        log_printf("【预编辑文字 (Preedit)】: %s", context.composition.preedit);
+                        log_printf("光标位置: 从 %d 到 %d", context.composition.sel_start, context.composition.sel_end);
+                    }
+                    
+                    log_printf("【候选词列表 (Menu)】(当前页共 %d 个):", context.menu.num_candidates);
+                    for (int i = 0; i < context.menu.num_candidates; ++i) {
+                        RimeCandidate candidate = context.menu.candidates[i];
+                        const char* select_label = (i == context.menu.highlighted_candidate_index) ? "-> " : "   ";
+                        log_printf("%s%d. %s (%s)", 
+                               select_label, 
+                               i + 1, 
+                               candidate.text, 
+                               candidate.comment ? candidate.comment : "");
+                    }
+                    log_printf("是否为最后一页: %s", context.menu.is_last_page ? "是" : "否");
+                    // 释放内存
+                    state->rime_api->free_context(&context);
+                }
+            } 
+        } else {
             xcb_im_forward_event(im, ic, event);
         }
     }
-*/
+
 }
 
 
@@ -311,23 +366,23 @@ int main(int argc, char *argv[])
 
     if(opt_help) {
         show_usage();
-        goto error;   
+        exit(0);   
     }
 
     if(opt_sync) {
         ret_value = rime_sync();
-        goto error;
+        exit(ret_value);
     }
 
     if(opt_deplay) {
         ret_value = rime_deplay();
-        goto error;        
+        exit(ret_value);
     }
 
     // 启动输入法
-
+    rime_state_init();    
     xcb_compound_text_init();
-
+    
     server_state.conn = xcb_connect(NULL, &screen_default_nbr);
     screen = xcb_aux_get_screen(server_state.conn, screen_default_nbr);
 
@@ -384,7 +439,7 @@ int main(int argc, char *argv[])
     trigger_key.modifier_mask = 1 << 2;
     trigger_keys.nKeys = 1;
     trigger_keys.keys = &trigger_key;
-
+    server_state.key_symbols = xcb_key_symbols_alloc(server_state.conn);
     // 创建 IM 实例 [1]
     im = xcb_im_create(
         server_state.conn,
@@ -415,12 +470,18 @@ int main(int argc, char *argv[])
     }
 
 error:
+    rime_state_destroy();
     if(im) {
         xcb_im_close_im(im);
         xcb_im_destroy(im);
     }
+    if(server_state.key_symbols) {
+        xcb_key_symbols_free(server_state.key_symbols);
+        server_state.key_symbols = NULL;
+    }
     if(server_state.conn) {
         xcb_disconnect(server_state.conn);
-    }
+        server_state.conn = NULL;
+    }    
     return ret_value;
 }

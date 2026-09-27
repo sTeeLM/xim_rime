@@ -1,6 +1,6 @@
 # 定义编译器和编译选项
 CC      = gcc
-CFLAGS  = -g -I/opt/local/include -I/opt/local/include/freetype2
+CFLAGS  = -g -I/opt/local/include -I/opt/local/include/freetype2 -I/opt/local/include/uthash
 LDFLAGS = -L/opt/local/lib
 LIBS    = -lX11 -lxcb -lxcb-keysyms -lxcb-util -lxcb-imdkit -lrime
 
