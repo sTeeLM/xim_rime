@@ -119,11 +119,11 @@ static void log_printf(const char * restrict format, ...)
     if(!opt_verbose)
         return;
 
-    printf("[RIME] ");
+    fprintf(stderr, "[RIME] ");
     va_start(ap, format);
-    vprintf(format , ap);
+    vfprintf(stderr, format , ap);
     va_end(ap);
-    printf("\n");
+    fprintf(stderr, "\n");
 }
 
 
@@ -165,7 +165,7 @@ static void rime_state_destroy()
     IMClientSession *entry, *tmp;
     if(server_state.rime_api) {
         HASH_ITER(hh, server_state.sessions, entry, tmp) {
-            log_printf("Free session ID: %d for Client %p\n", entry->rime_session_id, entry->client);
+            log_printf("Free session ID: %lu for Client %p", entry->rime_session_id, entry->client);
             HASH_DEL(server_state.sessions, entry);
             server_state.rime_api->destroy_session(entry->rime_session_id);
             free(entry);
@@ -718,11 +718,11 @@ int main(int argc, char *argv[])
 
 error:
     /* Clean up all initialized resources gracefully upon exit to prevent ghost leaks */
-    rime_state_destroy();
     if(im) {
         xcb_im_close_im(im);
         xcb_im_destroy(im);
     }
+    rime_state_destroy();
     if(server_state.key_symbols) {
         xcb_key_symbols_free(server_state.key_symbols);
         server_state.key_symbols = NULL;
