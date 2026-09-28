@@ -19,7 +19,7 @@
 #include <time.h>
 #include <uthash.h> 
 
-#define XIM_RIME_VERSION_STRING    "1.0.0"
+#define XIM_RIME_VERSION_STRING    "1.0.1"
 #define XIM_RIME_XIM_NAME          "xim_rime"
 #define XIM_RIME_APP_NAME          "xim_rime"
 #define XIM_RIME_DISTRIBUTION_NAME "Rime"
@@ -362,24 +362,24 @@ static int32_t rime_sync()
 
     rime_state_init();
     
-    log_printf("Starting synchronization task... ");
+    log_printf("starting synchronization task... ");
 
     /* Check if the engine is busy (if deploying or syncing, we must wait) */
     if (server_state.rime_api->is_maintenance_mode()) {
-        log_printf("The engine is currently busy, please try again later.");
+        log_printf("the engine is currently busy, please try again later.");
         ret_value = 1;
         goto error;
     }
 
     /* Trigger user data synchronization */
     if (server_state.rime_api->sync_user_data()) {
-        log_printf("Synchronization task successfully submitted to background.");
+        log_printf("synchronization task successfully submitted to background.");
         log_printf("sync directory %s", server_state.rime_api->get_sync_dir());
-        log_printf("Merging dictionaries bi-directionally and backing up configurations...");
+        log_printf("merging dictionaries bi-directionally and backing up configurations...");
         server_state.rime_api->join_maintenance_thread();
-        log_printf("Synchronization completed successfully!");
+        log_printf("synchronization completed successfully!");
     } else {
-        log_printf("Error: Failed to start synchronization task. Please verify configuration in installation.yaml.");
+        log_printf("error: failed to start synchronization task. please verify configuration in installation.yaml.");
         ret_value = 1;
     }
     
@@ -395,10 +395,10 @@ static int32_t rime_deploy()
 
     int32_t ret_value = 0;
 
-    log_printf("Starting deployment task...");    
+    log_printf("starting deployment task...");    
     rime_state_init();
     rime_state_destroy();
-    log_printf("Deployment completed successfully");    
+    log_printf("deployment completed successfully");    
     return ret_value;
 }
 
@@ -466,7 +466,7 @@ static void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context
 
                 
                 /* Text is Ready, dispatch it to the target text widget client application */
-                log_printf("[Commit Text Ready]: %s", commit.text);
+                log_printf("[commit text ready]: %s", commit.text);
                 result = xcb_utf8_to_compound_text(commit.text,
                                                    strlen(commit.text), &result_len);
                 xcb_im_commit_string(im, ic, XCB_XIM_LOOKUP_CHARS, result, result_len, 0);
@@ -483,11 +483,11 @@ static void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context
                 /* Query the current composition context to fetch preedit text and candidate listing */
                 if (state->rime_api->get_context(session->rime_session_id, &context)) {
                     if (context.composition.preedit) {
-                        log_printf("[Composition Preedit Text]: %s", context.composition.preedit);
-                        log_printf("Cursor offset: from %d to %d", context.composition.sel_start, context.composition.sel_end);
+                        log_printf("[composition preedit text]: %s", context.composition.preedit);
+                        log_printf("cursor offset: from %d to %d", context.composition.sel_start, context.composition.sel_end);
                     }
                     
-                    log_printf("[Candidates Menu Listing] (%d items on current page):", context.menu.num_candidates);
+                    log_printf("[candidates menu] (%d items on current page):", context.menu.num_candidates);
                     for (int i = 0; i < context.menu.num_candidates; ++i) {
                         RimeCandidate candidate = context.menu.candidates[i];
                         const char* select_label = (i == context.menu.highlighted_candidate_index) ? "-> " : "   ";
@@ -525,7 +525,7 @@ static struct {
 static void handle_signal(int sig)
 {
     (void)sig; /* Eliminate unused parameter compilation compiler warning */
-    log_printf("Quit!");
+    log_printf("quit!");
     quit_server = true; /* Flip termination flag to true to break out from main loop event engine */    
 
     /* Core Awakening Trick: If XCB connection is alive, send a dummy ClientMessage to our candidate window */
@@ -584,7 +584,7 @@ static bool parse_trigger_keys(const char * trigger_key_str,
         base_key = trigger_key_str; /* No modifiers present, treat entire block as base key */
     }
 
-    log_printf("parse basekey %s...", base_key);
+    log_printf("using basekey %s...", base_key);
 
     
     /* Map basic human-readable keywords to X11 Keysym definitions */
@@ -675,7 +675,7 @@ int main(int argc, char *argv[])
     }
 
     if(!opt_rime_user_data_dir[0]) {
-        printf("Error: user data directory required!");
+        printf("error: user data directory required!");
         ret_value = 1;
         exit(ret_value);
     }
@@ -712,7 +712,7 @@ int main(int argc, char *argv[])
     server_state.screen = xcb_aux_get_screen(server_state.conn, server_state.screen_nbr);
 
     if (!server_state.screen) {
-        log_printf("Error: can not connect to screen, quit!");
+        log_printf("error: can not connect to screen, quit!");
         ret_value = 1;
         goto error;
     }
@@ -721,9 +721,10 @@ int main(int argc, char *argv[])
     /* Instantiate target font framework specs */
     server_state.xft_font = XftFontOpenName(server_state.dpy, server_state.screen_nbr, opt_font);
     if (!server_state.xft_font) {
+        log_printf("warn: can not load font %s, using fallback font %s!", opt_font, XIM_RIME_DEFAULT_FONT);
         server_state.xft_font = XftFontOpenName(server_state.dpy, server_state.screen_nbr, XIM_RIME_DEFAULT_FONT);
         if(!server_state.xft_font) {
-            log_printf("Error: can not load font, quit!");
+            log_printf("error: can not load font %s, quit!", opt_font);
             ret_value = 1;
             goto error;
         }
@@ -787,7 +788,7 @@ int main(int argc, char *argv[])
 
     /* Parse trigger key */
     if(!parse_trigger_keys(opt_trigger_keys, &trigger_keys, &trigger_key)) {
-        log_printf("Error: failed to parse hotkey string: %s", opt_trigger_keys);
+        log_printf("error: failed to parse hotkey string: %s", opt_trigger_keys);
         ret_value = 1;
         goto error;
     }
@@ -814,7 +815,7 @@ int main(int argc, char *argv[])
         goto error;
     }
 
-    log_printf("XIM Server initialized successfully. Hidden comm window ID: %u, Candidate window ID: %u", w, server_state.win_candidate);
+    log_printf("XIM iserver initialized successfully. hidden comm window ID: %u, candidate window ID: %u", w, server_state.win_candidate);
 
     ret_value = 0;
     
