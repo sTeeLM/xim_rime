@@ -1,7 +1,13 @@
 #include <xcb-imdkit/encoding.h>
 #include <xcb-imdkit/imdkit.h>
 #include <xcb-imdkit/ximproto.h>
+#include <xcb/xcb.h>
+#include <xcb/xcb_aux.h>
+#include <xcb/xcb_keysyms.h>
+#include <xcb/xproto.h>
+#include <X11/Xft/Xft.h>
 #include <rime_api.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,10 +16,6 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <getopt.h>
-#include <xcb/xcb.h>
-#include <xcb/xcb_aux.h>
-#include <xcb/xcb_keysyms.h>
-#include <xcb/xproto.h>
 #include <uthash.h> 
 
 #define XIM_RIME_VERSION_STRING    "1.0.0"
@@ -27,26 +29,35 @@
 typedef struct _IMClientSession {
     UT_hash_handle hh;
     xcb_im_client_t * client;
+    xcb_window_t client_win;
     RimeSessionId rime_session_id;
 } IMClientSession;
 
 
 // 定义输入法全局状态
 typedef struct _IMServerState {
+    Display *dpy;
     xcb_connection_t *conn;
+    xcb_screen_t *screen;
+    int32_t screen_nbr;
+    XftFont * xft_font;         // Xft 字体对象
+    XftColor xft_fg;            // 字体前景色
+    XftColor xft_bg;            // 字体背景色
     xcb_window_t win_candidate; // 候选词窗口 ID
-    xcb_gcontext_t gc;          // 绘制上下文
+    xcb_im_client_t * current_client;
     RimeApi* rime_api;          // Rime API
     RimeTraits rime_traits;     // Rime Traits
     IMClientSession * sessions;
     xcb_key_symbols_t *key_symbols;
-    bool is_active;
 } IMServerState;
 
 /* options descriptor */
 static struct option longopts[] = {
     { "verbose",      no_argument,            NULL,           'v' },
     { "help",         no_argument,            NULL,           'h' },
+    { "font",         required_argument,      NULL,           'f' },
+    { "foreground-color",         required_argument,      NULL,           'c' },
+    { "background-color",         required_argument,      NULL,           'C' },
     { "deplay",       no_argument,            NULL,           'D' },
     { "sync",         no_argument,            NULL,           'S' },
     { "share-data-dir", required_argument,    NULL,           's' },
@@ -56,6 +67,9 @@ static struct option longopts[] = {
 
 #define XIM_RIME_DEFAULT_SHARE_DATA_DIR "/Library/Input Methods/Squirrel.app/Contents/SharedSupport"
 #define XIM_RIME_DEFAULT_USER_DATA_DIR  "/Users/michael/.config/xim_rime"
+#define XIM_RIME_DEFAULT_FONT           "San-Serif-14"
+#define XIM_RIME_DEFAULT_FG_COLOR       "#000000"
+#define XIM_RIME_DEFAULT_BG_COLOR       "#FFFFFF"
 
 static bool opt_verbose = false;
 static bool opt_help    = false;
@@ -63,6 +77,10 @@ static bool opt_deplay  = false;
 static bool opt_sync    = false;
 static char opt_rime_share_data_dir[512] =  XIM_RIME_DEFAULT_SHARE_DATA_DIR;
 static char opt_rime_user_data_dir[512]  =  XIM_RIME_DEFAULT_USER_DATA_DIR;
+static char opt_font[512] = XIM_RIME_DEFAULT_FONT;
+static char opt_fg_color[16] = XIM_RIME_DEFAULT_FG_COLOR;
+static char opt_bg_color[16] = XIM_RIME_DEFAULT_BG_COLOR;
+
 
 
 static uint32_t style_array[] = {
@@ -75,7 +93,7 @@ static xcb_im_styles_t styles = {1, style_array};
 
 
 static  IMServerState server_state = {0};
-static  bool quit_server = false;
+volatile sig_atomic_t quit_server = false; 
 
 
 static void show_usage()
@@ -88,6 +106,10 @@ static void show_usage()
     printf("          -u|--user-data-dir: user data directory of Rime, default %s\n", XIM_RIME_DEFAULT_USER_DATA_DIR);
     printf("          -d|--deplay: deplay Rime\n");
     printf("          -S|--sync: sync user data of Rime\n");
+    printf("          -f|--font: set font, default %s\n", XIM_RIME_DEFAULT_FONT);
+    printf("          -c|--foreground-color: set foreground color, default %s\n", XIM_RIME_DEFAULT_FG_COLOR);
+    printf("          -C|--background-color: set foreground color, default %s\n", XIM_RIME_DEFAULT_BG_COLOR);
+    
 }
 
 static void log_printf(const char * restrict format, ...)
@@ -103,6 +125,8 @@ static void log_printf(const char * restrict format, ...)
     va_end(ap);
     printf("\n");
 }
+
+
 
 static void rime_notification_handler(void *context,
                                  RimeSessionId session_id,
@@ -152,35 +176,143 @@ static void rime_state_destroy()
     }
 }
 
-/*
-// 绘制候选词窗口的函数
-void draw_candidate_window(IMServerState *state) {
-    if (!state->is_active || state->pinyin_len == 0) {
-        // 如果输入法未激活或没输入字母，隐藏窗口
-        uint32_t values[] = { XCB_NONE };
-        xcb_unmap_window(state->conn, state->win_candidate);
-        xcb_flush(state->conn);
-        return;
+
+// 动态将候选窗口定位到客户端窗口的左下角
+void move_to_client_bottom_left(IMServerState *state, xcb_window_t client_win, uint32_t win_width, uint32_t win_height)
+{
+    if (client_win == 0) return;
+
+    // 1. 获取客户端窗口的相对几何尺寸 (相对其父窗口的宽、高、相对 X/Y)
+    xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(state->conn, client_win);
+    xcb_get_geometry_reply_t *geom_reply = xcb_get_geometry_reply(state->conn, geom_cookie, NULL);
+    
+    if (!geom_reply) return;
+
+    uint16_t client_width = geom_reply->width;
+    uint16_t client_height = geom_reply->height;
+    free(geom_reply);
+
+    // 2. 核心难点：客户端窗口的相对横纵坐标通常是相对于它的父窗口（比如窗口管理器加的边框）
+    // 必须调用 translate_coordinates 将客户端窗口的 (0, 0) 原点，翻译为相对于屏幕 Root 窗口的绝对坐标
+    xcb_translate_coordinates_cookie_t trans_cookie = xcb_translate_coordinates(
+        state->conn, 
+        client_win, 
+        state->screen->root, 
+        0, 0
+    );
+    xcb_translate_coordinates_reply_t *trans_reply = xcb_translate_coordinates_reply(state->conn, trans_cookie, NULL);
+
+    if (trans_reply) {
+        // 绝对坐标的左上角
+        int abs_client_x = trans_reply->dst_x;
+        int abs_client_y = trans_reply->dst_y;
+        free(trans_reply);
+
+        // 3. 计算左下角的绝对位置：
+        // X 轴不变（即左对齐）：abs_client_x
+        // Y 轴下移（加上客户端自身高度）：abs_client_y + client_height
+        int target_x = abs_client_x;
+        int target_y = abs_client_y + client_height;
+
+        // 4. 执行窗口重配置（移动位置 + 缩放大小）
+        uint32_t config_mask = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT | XCB_CONFIG_WINDOW_STACK_MODE;
+        uint32_t config_values[] = { (uint32_t)target_x, (uint32_t)target_y, win_width, win_height , XCB_STACK_MODE_ABOVE};
+        xcb_configure_window(state->conn, state->win_candidate, config_mask, config_values);
     }
+}
 
-    // 1. 让窗口显示出来
-    xcb_map_window(state->conn, state->win_candidate);
 
-    // 2. 清空窗口背景
-    xcb_clear_area(state->conn, 0, state->win_candidate, 0, 0, 300, 50);
+// 隐藏候选词窗口
+void hide_candidate_window(IMServerState *state, IMClientSession *session)
+{
+    uint32_t config_mask = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
+    uint32_t config_values[] = { 0, 0, 1, 1};
 
-    // 3. 构造要显示的文本 (拼音 + 候选词)
-    char display_text[128];
-    const char *cand = lookup_candidate(state->pinyin_buffer);
-    snprintf(display_text, sizeof(display_text), "[%s]: %s", state->pinyin_buffer, cand);
-
-    // 4. 使用系统的默认普通字体绘制到窗口上 (XCB 默认只能绘制标准 ASCII/Latin1 字符)
-    // 注意：在没有引入当前复杂字体库(Xft/Fontconfig)前，先用英文/数字展示候选结构
-    xcb_image_text_8(state->conn, strlen(display_text), state->win_candidate, state->gc, 10, 30, display_text);
+    log_printf("hide candidate window for client %p", session->client);
+    
+    xcb_configure_window(state->conn, state->win_candidate, config_mask, config_values);
+    xcb_unmap_window(state->conn, state->win_candidate);
     xcb_flush(state->conn);
 }
 
-*/
+
+// 绘制候选词窗口
+#define XIM_RIME_MAX_CANDIDATES_STR_LEN (40960)
+static char candidates_str[XIM_RIME_MAX_CANDIDATES_STR_LEN];
+
+void draw_candidate_window(IMServerState *state, IMClientSession *session,  RimeContext * context)
+{
+    size_t candidates_len = 0;
+    RimeCandidate candidate;
+    XGlyphInfo extents;
+    XftDraw *draw = NULL;
+    uint32_t config_values[4] = {0};
+    uint32_t config_mask = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
+    
+    int32_t i, w_w = 0, w_h = 0;
+    const char * preedit_str = context->composition.preedit;
+    
+    // 获得 candidates
+    for (i = 0; i < context->menu.num_candidates && candidates_len < XIM_RIME_MAX_CANDIDATES_STR_LEN - 1; ++i) {
+        candidate = context->menu.candidates[i];
+        candidates_len += snprintf( candidates_str + candidates_len,
+                                   XIM_RIME_MAX_CANDIDATES_STR_LEN - candidates_len,
+                                   "%d. %s ", i + 1, candidate.text);
+    }
+    candidates_str[candidates_len] = 0;
+
+    log_printf("preedit_str %s", preedit_str ? preedit_str : "");
+    log_printf("candidates_str %s", candidates_str);
+
+    if(preedit_str == NULL && candidates_str[0] == 0) {
+        hide_candidate_window(state, session);
+        return;
+    }
+
+    // 记录下当前的client
+    state->current_client = session->client;
+    
+    w_h = state->xft_font->height * 2 + 20;
+    
+    // 计算窗口w_w
+    if(preedit_str) {
+        XftTextExtentsUtf8(state->dpy, state->xft_font, (XftChar8 *)preedit_str, strlen(preedit_str), &extents);
+        w_w = extents.xOff + 20; 
+    }
+
+    XftTextExtentsUtf8(state->dpy, state->xft_font, (XftChar8 *)candidates_str, strlen(candidates_str), &extents);
+    if(w_w < extents.xOff + 20)
+        w_w = extents.xOff + 20;
+
+    log_printf("w_h = %d w_w = %d", w_h, w_w);
+
+    move_to_client_bottom_left(state, session->client_win, w_w, w_h);      
+    xcb_map_window(state->conn, state->win_candidate);
+    xcb_flush(state->conn);
+
+    XSync(state->dpy, True); 
+    
+    //创建 XftDraw 并在窗口上绘制汉字
+    draw = XftDrawCreate(state->dpy, (Drawable)state->win_candidate, 
+                         DefaultVisual(state->dpy, state->screen_nbr), 
+                         DefaultColormap(state->dpy, state->screen_nbr));
+    if(draw) {
+        XftDrawRect(draw, &state->xft_bg, 0, 0, w_w, w_h);
+        if(preedit_str) {
+            XftDrawStringUtf8(draw, &state->xft_fg, state->xft_font, 10, state->xft_font->height + 10, (XftChar8 *)preedit_str, strlen(preedit_str));
+        }
+        if(strlen(candidates_str)) {
+            XftDrawStringUtf8(draw, &state->xft_fg, state->xft_font, 10, w_h - 10, (XftChar8 *)candidates_str, strlen(candidates_str));
+        }
+        XftDrawDestroy(draw);
+        XFlush(state->dpy);
+    } else {
+        log_printf("draw is null");
+    }
+
+}
+
+
 
 int32_t rime_sync()
 {
@@ -216,7 +348,7 @@ error:
 
 }
 
-int32_t rime_deplay()
+int32_t rime_deploy()
 {
 
     int32_t ret_value = 0;
@@ -253,8 +385,11 @@ void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
     // 删除Session
     if (hdr->major_opcode == XCB_XIM_DISCONNECT) {
         if (session) {
-            log_printf("delete session id %lu for %p\n", session->rime_session_id, session->client);
+            log_printf("delete session id %lu for %p", session->rime_session_id, session->client);
             HASH_DEL(state->sessions, session);
+            if(session->client == state->current_client) {
+                 hide_candidate_window(state, session);
+            }
             state->rime_api->destroy_session(session->rime_session_id);            
             free(session);
         }
@@ -274,6 +409,8 @@ void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
         if (event->state & XCB_MOD_MASK_CONTROL) rime_mask |= (1 << 2);
         if (event->state & XCB_MOD_MASK_1)       rime_mask |= (1 << 3); // 通常对应 Alt/Option 键
         if (event->state & XCB_MOD_MASK_4)       rime_mask |= (1 << 6); // 通常对应 Super/Command 键
+
+        session->client_win = xcb_im_input_context_get_client_window(ic);
         
         if(state->rime_api->process_key(session->rime_session_id, keycode, rime_mask)) {
 
@@ -281,7 +418,8 @@ void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
 
             // get_commit 如果返回 True，说明上屏文本已经 Ready！
             if (state->rime_api->get_commit(session->rime_session_id, &commit)) {
-        
+
+                
                 // 此时文本已 Ready，你可以拿去输出到你的目标文本框中
                 log_printf("【上屏文本 Ready】: %s", commit.text);
                 result = xcb_utf8_to_compound_text(commit.text,
@@ -290,6 +428,10 @@ void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
                 // 记得释放内存！
                 free(result);
                 state->rime_api->free_commit(&commit);
+
+                // 隐藏候选词窗口
+                hide_candidate_window(state, session);
+                
             } else {
                 RIME_STRUCT_INIT(RimeContext, context);
                 // 上屏文本没有 Ready，说明用户还在继续输入（组合编码阶段）
@@ -311,10 +453,16 @@ void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
                                candidate.comment ? candidate.comment : "");
                     }
                     log_printf("是否为最后一页: %s", context.menu.is_last_page ? "是" : "否");
+
+                    // 绘制候选词窗口
+                    draw_candidate_window(state, session, &context);
+
                     // 释放内存
                     state->rime_api->free_context(&context);
                 }
             } 
+        } else if (hdr->major_opcode == XCB_XIM_UNSET_IC_FOCUS && session) {
+            hide_candidate_window(state, session);
         } else {
             xcb_im_forward_event(im, ic, event);
         }
@@ -322,24 +470,51 @@ void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
 
 }
 
+static struct {
+    xcb_connection_t *conn;
+    xcb_window_t win;
+} sig_bridge = {NULL, 0};
+
+
+// 信号捕获回调函数
+static void handle_signal(int sig)
+{
+    (void)sig; // 消除未引用的编译器 Warning
+    log_printf("Quit!");
+    quit_server = true; // 标志位置为 true，通知主循环准备退出    
+
+   // 🌟 核心唤醒逻辑：如果 XCB 连接已经建立，向自己的候选窗口发送一个 ClientMessage
+    if (sig_bridge.conn && sig_bridge.win) {
+        xcb_client_message_event_t ev = {0};
+        ev.response_type = XCB_CLIENT_MESSAGE;
+        ev.format = 32;
+        ev.window = sig_bridge.win;
+        ev.type = XCB_ATOM_ATOM; // 可以是任何合法的 Atom，这里用标准的 ATOM 即可
+        
+        // 发送事件给自己，强行踢醒阻塞的 xcb_wait_for_event
+        xcb_send_event(sig_bridge.conn, false, sig_bridge.win, XCB_EVENT_MASK_NO_EVENT, (const char *)&ev);
+        xcb_flush(sig_bridge.conn); // 必须 flush 确保立刻写入网络管道
+        log_printf("quit message sent!");
+    }
+}
+
 
 int main(int argc, char *argv[])
 {
     int ch;
     int ret_value = 0;
-    int screen_default_nbr;
-    xcb_screen_t *screen = NULL;
-    uint32_t win_candidat_mask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL;
-    uint32_t win_candidat_values[2] = {0}; // 白色背景，黑色边框
-    uint32_t gc_values[2] = {0};
+    uint32_t win_candidat_mask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_OVERRIDE_REDIRECT;
+    uint32_t win_candidat_values[3] = {0}; // 白色背景，黑色边框
     xcb_im_trigger_keys_t trigger_keys;
     xcb_im_ximtriggerkey_fr_t trigger_key;
     xcb_im_t *im = NULL;
     xcb_window_t w;
     xcb_generic_event_t *event = NULL;
+    struct sigaction sa;
+
     
     // 解析命令行参数    
-    while ((ch = getopt_long(argc, argv, "vhDSs:u:", longopts, NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "vhDSs:u:f:c:C:", longopts, NULL)) != -1) {
         switch (ch) {
         case 'v':
             opt_verbose = true;
@@ -361,6 +536,18 @@ int main(int argc, char *argv[])
             strncpy(opt_rime_user_data_dir,  optarg, sizeof(opt_rime_user_data_dir));
             opt_rime_user_data_dir[sizeof(opt_rime_user_data_dir) - 1] = 0;
             break;
+        case 'f':
+            strncpy(opt_font,  optarg, sizeof(opt_font));
+            opt_font[sizeof(opt_font) - 1] = 0;
+            break;
+        case 'c':
+            strncpy(opt_fg_color,  optarg, sizeof(opt_fg_color));
+            opt_fg_color[sizeof(opt_fg_color) - 1] = 0;
+            break;            
+        case 'C':
+            strncpy(opt_bg_color,  optarg, sizeof(opt_bg_color));
+            opt_bg_color[sizeof(opt_bg_color) - 1] = 0;
+            break;            
         }
     }
 
@@ -375,65 +562,103 @@ int main(int argc, char *argv[])
     }
 
     if(opt_deplay) {
-        ret_value = rime_deplay();
+        ret_value = rime_deploy();
         exit(ret_value);
     }
 
+
+    // 注册信号处理handle
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    
+    // 分别拦截 Ctrl+C (SIGINT) 和 kill 命令发出的默认终止信号 (SIGTERM)
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    
     // 启动输入法
     rime_state_init();    
     xcb_compound_text_init();
-    
-    server_state.conn = xcb_connect(NULL, &screen_default_nbr);
-    screen = xcb_aux_get_screen(server_state.conn, screen_default_nbr);
 
-    if (!screen) {
+    // 初始化 Xlib (Xft 运行必须通过 Xlib 建立全局显示环境)
+    server_state.dpy = XOpenDisplay(NULL);
+    server_state.conn = xcb_connect(NULL, &server_state.screen_nbr);
+    server_state.screen = xcb_aux_get_screen(server_state.conn, server_state.screen_nbr);
+
+    if (!server_state.screen) {
         ret_value = 1;
         goto error;
     }
 
+    
+    // 加载字体
+    server_state.xft_font = XftFontOpenName(server_state.dpy, server_state.screen_nbr, opt_font);
+    if (!server_state.xft_font) {
+        server_state.xft_font = XftFontOpenName(server_state.dpy, server_state.screen_nbr, XIM_RIME_DEFAULT_FONT);
+        if(!server_state.xft_font) {
+            log_printf("can not load font, quit!");
+            ret_value = 1;
+            goto error;
+        }
+    }
+
+    // 分配前景色（黑色）和背景色（浅灰）
+    XftColorAllocName(server_state.dpy,
+                      DefaultVisual(server_state.dpy, server_state.screen_nbr),
+                      DefaultColormap(server_state.dpy, server_state.screen_nbr),
+                      opt_fg_color,
+                      &server_state.xft_fg);
+    XftColorAllocName(server_state.dpy,
+                      DefaultVisual(server_state.dpy, server_state.screen_nbr),
+                      DefaultColormap(server_state.dpy, server_state.screen_nbr),
+                      opt_bg_color,
+                      &server_state.xft_bg);
+    
+   
     w = xcb_generate_id(server_state.conn);
-    // 1. 创建 XIM 协议底层通信用的隐藏窗口 [1]
+
+    //  创建 XIM 协议底层通信用的隐藏窗口 [1]
     xcb_create_window(server_state.conn,
                       XCB_COPY_FROM_PARENT,
                       w,
-                      screen->root,
+                      server_state.screen->root,
                       0,
                       0,
                       1,
                       1,
                       1,
                       XCB_WINDOW_CLASS_INPUT_OUTPUT,
-                      screen->root_visual,
+                      server_state.screen->root_visual,
                       0,
                       NULL);
 
-    // 2. 创建真正的输入法【候选词窗口】 (长 300，高 50)
+    //  创建真正的输入法【候选词窗口】 (长 300，高 50)
     server_state.win_candidate = xcb_generate_id(server_state.conn);
-    win_candidat_values[0] = screen->white_pixel;
-    win_candidat_values[1] = screen->black_pixel; // 白色背景，黑色边框
+    win_candidat_values[0] = server_state.xft_bg.pixel;
+    win_candidat_values[1] = server_state.xft_fg.pixel;
+    win_candidat_values[2] = 1;
     
     // 创建一个位于坐标 (200, 200) 的可见弹出窗口
     xcb_create_window(server_state.conn,
                       XCB_COPY_FROM_PARENT,
                       server_state.win_candidate,
-                      screen->root, 
-                      200, 200, 300, 50, 2,
+                      server_state.screen->root, 
+                      0, 0, 1, 1, 1,
                       XCB_WINDOW_CLASS_INPUT_OUTPUT,
-                      screen->root_visual,
+                      server_state.screen->root_visual,
                       win_candidat_mask,
                       win_candidat_values);
 
-    // 创建图形上下文 (GC) 用来绘制文字
-    gc_values[0] = screen->black_pixel;
-    gc_values[1] = screen->white_pixel;
-    server_state.gc = xcb_generate_id(server_state.conn);
-    xcb_create_gc(server_state.conn,
-                  server_state.gc,
-                  server_state.win_candidate,
-                  XCB_GC_FOREGROUND | XCB_GC_BACKGROUND,
-                  gc_values);
+    xcb_map_window(server_state.conn, server_state.win_candidate);
+    xcb_unmap_window(server_state.conn, server_state.win_candidate);
+    xcb_flush(server_state.conn);
+    XSync(server_state.dpy, False); // 确保预热在主循环开始前被 X 服务器消化完毕
 
-    // 3. 配置触发键 (Ctrl + Space) [1]
+    sig_bridge.conn = server_state.conn;
+    sig_bridge.win  = server_state.win_candidate;
+
+    
+    // 配置触发键 (Ctrl + Space) [1]
     trigger_key.keysym = ' ';
     trigger_key.modifier = 1 << 2;
     trigger_key.modifier_mask = 1 << 2;
@@ -443,7 +668,7 @@ int main(int argc, char *argv[])
     // 创建 IM 实例 [1]
     im = xcb_im_create(
         server_state.conn,
-        screen_default_nbr,
+        server_state.screen_nbr,
         w,
         XIM_RIME_XIM_NAME,
         XCB_IM_ALL_LOCALES,
@@ -482,6 +707,22 @@ error:
     if(server_state.conn) {
         xcb_disconnect(server_state.conn);
         server_state.conn = NULL;
-    }    
+    }
+    if(server_state.dpy) {
+        XftColorFree(server_state.dpy,
+                     DefaultVisual(server_state.dpy, server_state.screen_nbr),
+                     DefaultColormap(server_state.dpy, server_state.screen_nbr),
+                     &server_state.xft_fg);
+        XftColorFree(server_state.dpy,
+                     DefaultVisual(server_state.dpy, server_state.screen_nbr),
+                     DefaultColormap(server_state.dpy, server_state.screen_nbr),
+                     &server_state.xft_bg);
+        if(server_state.xft_font) {
+            XftFontClose(server_state.dpy, server_state.xft_font);
+            server_state.xft_font = NULL;
+        }
+        XCloseDisplay(server_state.dpy);
+        server_state.dpy = NULL;
+    }
     return ret_value;
 }
