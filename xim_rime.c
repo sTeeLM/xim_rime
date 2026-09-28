@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <getopt.h>
+#include <time.h>
 #include <uthash.h> 
 
 #define XIM_RIME_VERSION_STRING    "1.0.0"
@@ -116,11 +117,24 @@ static void show_usage()
 static void log_printf(const char * restrict format, ...)
 {
     va_list ap;
-
+    struct timespec ts;   
+    struct tm time_info;
+    
     if(!opt_verbose)
         return;
 
-    fprintf(stderr, "[RIME] ");
+    clock_gettime(CLOCK_REALTIME, &ts);
+    localtime_r(&ts.tv_sec, &time_info);
+
+    fprintf(stderr, "[%04d-%02d-%02d %02d:%02d:%02d.%06ld] [RIME] ",
+           time_info.tm_year + 1900,
+           time_info.tm_mon + 1,
+           time_info.tm_mday,
+           time_info.tm_hour,
+           time_info.tm_min,
+           time_info.tm_sec,
+           ts.tv_nsec / 1000);
+
     va_start(ap, format);
     vfprintf(stderr, format , ap);
     va_end(ap);
@@ -178,7 +192,7 @@ static void rime_state_destroy()
     IMClientSession *entry, *tmp;
     if(server_state.rime_api) {
         HASH_ITER(hh, server_state.sessions, entry, tmp) {
-            log_printf("Free session ID: %lu for Client %p", entry->rime_session_id, entry->client);
+            log_printf("Free session %lu for client %p", entry->rime_session_id, entry->client);
             HASH_DEL(server_state.sessions, entry);
             server_state.rime_api->destroy_session(entry->rime_session_id);
             free(entry);
@@ -285,7 +299,7 @@ static void draw_candidate_window(IMServerState *state, IMClientSession *session
         candidate = context->menu.candidates[i];
         candidates_len += snprintf( candidates_str + candidates_len,
                                     XIM_RIME_MAX_CANDIDATES_STR_LEN - candidates_len,
-                                    "%d. %s ", i + 1, candidate.text);
+                                    "%d.%s ", i + 1, candidate.text);
     }
     candidates_str[candidates_len] = 0;
 
@@ -300,17 +314,17 @@ static void draw_candidate_window(IMServerState *state, IMClientSession *session
     /* Record the current active client */
     state->current_client = session->client;
     
-    w_h = state->xft_font->height * 2 + 20;
+    w_h = state->xft_font->height * 2 + 10;
     
     /* Calculate window width (w_w) */
     if(preedit_str) {
         XftTextExtentsUtf8(state->dpy, state->xft_font, (XftChar8 *)preedit_str, strlen(preedit_str), &extents);
-        w_w = extents.xOff + 20; 
+        w_w = extents.xOff + 10; 
     }
 
     XftTextExtentsUtf8(state->dpy, state->xft_font, (XftChar8 *)candidates_str, strlen(candidates_str), &extents);
-    if(w_w < extents.xOff + 20)
-        w_w = extents.xOff + 20;
+    if(w_w < extents.xOff + 10)
+        w_w = extents.xOff + 10;
 
     log_printf("w_h = %d w_w = %d", w_h, w_w);
 
@@ -327,10 +341,10 @@ static void draw_candidate_window(IMServerState *state, IMClientSession *session
     if(draw) {
         XftDrawRect(draw, &state->xft_bg, 0, 0, w_w, w_h);
         if(preedit_str) {
-            XftDrawStringUtf8(draw, &state->xft_fg, state->xft_font, 10, state->xft_font->height + 10, (XftChar8 *)preedit_str, strlen(preedit_str));
+            XftDrawStringUtf8(draw, &state->xft_fg, state->xft_font, 5, state->xft_font->height - 5, (XftChar8 *)preedit_str, strlen(preedit_str));
         }
-        if(strlen(candidates_str)) {
-            XftDrawStringUtf8(draw, &state->xft_fg, state->xft_font, 10, w_h - 10, (XftChar8 *)candidates_str, strlen(candidates_str));
+        if(candidates_str[0]) {
+            XftDrawStringUtf8(draw, &state->xft_fg, state->xft_font, 5, w_h - 5, (XftChar8 *)candidates_str, strlen(candidates_str));
         }
         XftDrawDestroy(draw);
         XFlush(state->dpy);
@@ -422,7 +436,7 @@ static void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context
     /* Handle session deletion */
     if (hdr->major_opcode == XCB_XIM_DISCONNECT) {
         if (session) {
-            log_printf("delete session id %lu for %p", session->rime_session_id, session->client);
+            log_printf("delete session %lu for client %p", session->rime_session_id, session->client);
             HASH_DEL(state->sessions, session);
             if(session->client == state->current_client) {
                 hide_candidate_window(state, session);
@@ -661,7 +675,7 @@ int main(int argc, char *argv[])
     }
 
     if(!opt_rime_user_data_dir[0]) {
-        printf("user data directory required!");
+        printf("Error: user data directory required!");
         ret_value = 1;
         exit(ret_value);
     }
@@ -698,7 +712,7 @@ int main(int argc, char *argv[])
     server_state.screen = xcb_aux_get_screen(server_state.conn, server_state.screen_nbr);
 
     if (!server_state.screen) {
-        log_printf("can not connect to screen, quit!");
+        log_printf("Error: can not connect to screen, quit!");
         ret_value = 1;
         goto error;
     }
@@ -709,7 +723,7 @@ int main(int argc, char *argv[])
     if (!server_state.xft_font) {
         server_state.xft_font = XftFontOpenName(server_state.dpy, server_state.screen_nbr, XIM_RIME_DEFAULT_FONT);
         if(!server_state.xft_font) {
-            log_printf("can not load font, quit!");
+            log_printf("Error: can not load font, quit!");
             ret_value = 1;
             goto error;
         }
@@ -773,7 +787,7 @@ int main(int argc, char *argv[])
 
     /* Parse trigger key */
     if(!parse_trigger_keys(opt_trigger_keys, &trigger_keys, &trigger_key)) {
-        log_printf("failed to parse hotkey string: %s", opt_trigger_keys);
+        log_printf("Error: failed to parse hotkey string: %s", opt_trigger_keys);
         ret_value = 1;
         goto error;
     }
