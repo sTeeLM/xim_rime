@@ -66,17 +66,16 @@ static struct option longopts[] = {
 };
 
 #define XIM_RIME_DEFAULT_SHARE_DATA_DIR "/Library/Input Methods/Squirrel.app/Contents/SharedSupport"
-#define XIM_RIME_DEFAULT_USER_DATA_DIR  "/Users/michael/.config/xim_rime"
 #define XIM_RIME_DEFAULT_FONT           "San-Serif-14"
 #define XIM_RIME_DEFAULT_FG_COLOR       "#000000"
 #define XIM_RIME_DEFAULT_BG_COLOR       "#FFFFFF"
 
 static bool opt_verbose = false;
 static bool opt_help    = false;
-static bool opt_deplay  = false;
+static bool opt_deploy  = false;
 static bool opt_sync    = false;
 static char opt_rime_share_data_dir[512] =  XIM_RIME_DEFAULT_SHARE_DATA_DIR;
-static char opt_rime_user_data_dir[512]  =  XIM_RIME_DEFAULT_USER_DATA_DIR;
+static char opt_rime_user_data_dir[512]  =  {0};
 static char opt_font[512] = XIM_RIME_DEFAULT_FONT;
 static char opt_fg_color[16] = XIM_RIME_DEFAULT_FG_COLOR;
 static char opt_bg_color[16] = XIM_RIME_DEFAULT_BG_COLOR;
@@ -98,17 +97,17 @@ volatile sig_atomic_t quit_server = false;
 
 static void show_usage()
 {
-    printf("%s version %s", XIM_RIME_APP_NAME, XIM_RIME_VERSION_STRING);
-    printf("    usage: %s [option]", XIM_RIME_APP_NAME);
-    printf("          -v|--verbose: verbose mode");
-    printf("          -h|--help: show help");
-    printf("          -s|--share-data-dir: share data directory of Rime, default %s", XIM_RIME_DEFAULT_SHARE_DATA_DIR);
-    printf("          -u|--user-data-dir: user data directory of Rime, default %s", XIM_RIME_DEFAULT_USER_DATA_DIR);
-    printf("          -d|--deplay: deploy Rime");
-    printf("          -S|--sync: sync user data of Rime");
-    printf("          -f|--font: set font, default %s", XIM_RIME_DEFAULT_FONT);
-    printf("          -c|--foreground-color: set foreground color, default %s", XIM_RIME_DEFAULT_FG_COLOR);
-    printf("          -C|--background-color: set background color, default %s", XIM_RIME_DEFAULT_BG_COLOR);
+    printf("%s version %s\n", XIM_RIME_APP_NAME, XIM_RIME_VERSION_STRING);
+    printf("    usage: %s [option]\n", XIM_RIME_APP_NAME);
+    printf("          -v|--verbose: verbose mode\n");
+    printf("          -h|--help: show help\n");
+    printf("          -s|--share-data-dir: share data directory of Rime, default %s\n", XIM_RIME_DEFAULT_SHARE_DATA_DIR);
+    printf("          -u|--user-data-dir: user data directory of Rime, required\n");
+    printf("          -d|--deplay: deploy Rime\n");
+    printf("          -S|--sync: sync user data of Rime\n");
+    printf("          -f|--font: set font, default %s\n", XIM_RIME_DEFAULT_FONT);
+    printf("          -c|--foreground-color: set foreground color, default %s\n", XIM_RIME_DEFAULT_FG_COLOR);
+    printf("          -C|--background-color: set background color, default %s\n", XIM_RIME_DEFAULT_BG_COLOR);
     
 }
 
@@ -126,7 +125,18 @@ static void log_printf(const char * restrict format, ...)
     fprintf(stderr, "\n");
 }
 
-
+static void dump_config()
+{
+    log_printf("          verbose: %d", opt_verbose);
+    log_printf("             help: %d", opt_help);
+    log_printf("             sync: %d", opt_sync);
+    log_printf("           deploy: %d", opt_deploy);
+    log_printf("   share-data-dir: %s", opt_rime_share_data_dir);
+    log_printf("    user-data-dir: %s", opt_rime_user_data_dir);
+    log_printf("             font: %s", opt_font);
+    log_printf(" foreground-color: %s", opt_fg_color);
+    log_printf(" background-color: %s", opt_bg_color);
+}
 
 static void rime_notification_handler(void *context,
                                       RimeSessionId session_id,
@@ -178,7 +188,7 @@ static void rime_state_destroy()
 
 
 /* Dynamically position the candidate window to the bottom-left corner of the client window */
-void move_to_client_bottom_left(IMServerState *state, xcb_window_t client_win, uint32_t win_width, uint32_t win_height)
+static void move_to_client_bottom_left(IMServerState *state, xcb_window_t client_win, uint32_t win_width, uint32_t win_height)
 {
 
     xcb_get_geometry_cookie_t geom_cookie;
@@ -240,7 +250,7 @@ void move_to_client_bottom_left(IMServerState *state, xcb_window_t client_win, u
 
 
 /* Hide the candidate window */
-void hide_candidate_window(IMServerState *state, IMClientSession *session)
+static void hide_candidate_window(IMServerState *state, IMClientSession *session)
 {
     uint32_t config_mask = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
     uint32_t config_values[] = { 0, 0, 1, 1};
@@ -257,7 +267,7 @@ void hide_candidate_window(IMServerState *state, IMClientSession *session)
 #define XIM_RIME_MAX_CANDIDATES_STR_LEN (40960)
 static char candidates_str[XIM_RIME_MAX_CANDIDATES_STR_LEN];
 
-void draw_candidate_window(IMServerState *state, IMClientSession *session,  RimeContext * context)
+static void draw_candidate_window(IMServerState *state, IMClientSession *session,  RimeContext * context)
 {
     size_t candidates_len = 0;
     RimeCandidate candidate;
@@ -329,7 +339,7 @@ void draw_candidate_window(IMServerState *state, IMClientSession *session,  Rime
 
 
 
-int32_t rime_sync()
+static int32_t rime_sync()
 {
     int32_t ret_value = 0;
 
@@ -363,7 +373,7 @@ error:
 
 }
 
-int32_t rime_deploy()
+static int32_t rime_deploy()
 {
 
     int32_t ret_value = 0;
@@ -375,7 +385,7 @@ int32_t rime_deploy()
     return ret_value;
 }
 
-void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
+static void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context_t *ic,
               const xcb_im_packet_header_fr_t *hdr, void *frame, void *arg,
               void *user_data)
 {
@@ -541,7 +551,7 @@ int main(int argc, char *argv[])
             opt_help = true;
             break;
         case 'D':
-            opt_deplay = true;
+            opt_deploy = true;
             break;
         case 'S':
             opt_sync = true;
@@ -574,12 +584,20 @@ int main(int argc, char *argv[])
         exit(0);   
     }
 
+    if(!opt_rime_user_data_dir[0]) {
+        printf("user data directory required!");
+        ret_value = 1;
+        exit(ret_value);
+    }
+
+    dump_config();
+
     if(opt_sync) {
         ret_value = rime_sync();
         exit(ret_value);
     }
 
-    if(opt_deplay) {
+    if(opt_deploy) {
         ret_value = rime_deploy();
         exit(ret_value);
     }
