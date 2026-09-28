@@ -103,14 +103,14 @@ static void show_usage()
     printf("    usage: %s [option]\n", XIM_RIME_APP_NAME);
     printf("          -v|--verbose: verbose mode\n");
     printf("          -h|--help: show help\n");
-    printf("          -s|--share-data-dir: share data directory of Rime, default %s\n", XIM_RIME_DEFAULT_SHARE_DATA_DIR);
-    printf("          -u|--user-data-dir: user data directory of Rime, required\n");
     printf("          -d|--deplay: deploy Rime\n");
     printf("          -S|--sync: sync user data of Rime\n");
+    printf("          -s|--share-data-dir: share data directory of Rime, default %s\n", XIM_RIME_DEFAULT_SHARE_DATA_DIR);
+    printf("          -u|--user-data-dir: user data directory of Rime, required\n");
     printf("          -f|--font: set font, default %s\n", XIM_RIME_DEFAULT_FONT);
     printf("          -c|--foreground-color: set foreground color, default %s\n", XIM_RIME_DEFAULT_FG_COLOR);
     printf("          -C|--background-color: set background color, default %s\n", XIM_RIME_DEFAULT_BG_COLOR);
-    
+    printf("          -t|--trigger-keys: set trigger keys (hotkey), default %s\n", XIM_RIME_DEFAULT_TRIGGER_KEYS);
 }
 
 static void log_printf(const char * restrict format, ...)
