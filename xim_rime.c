@@ -62,6 +62,7 @@ static struct option longopts[] = {
     { "sync",         no_argument,            NULL,           'S' },
     { "share-data-dir", required_argument,    NULL,           's' },
     { "user-data-dir",  required_argument,    NULL,           'u' },
+    { "trigger-keys", required_argument,      NULL,           't' },
     { NULL,           0,                      NULL,            0  }
 };
 
@@ -69,6 +70,7 @@ static struct option longopts[] = {
 #define XIM_RIME_DEFAULT_FONT           "San-Serif-14"
 #define XIM_RIME_DEFAULT_FG_COLOR       "#000000"
 #define XIM_RIME_DEFAULT_BG_COLOR       "#FFFFFF"
+#define  XIM_RIME_DEFAULT_TRIGGER_KEYS  "Control+Space"
 
 static bool opt_verbose = false;
 static bool opt_help    = false;
@@ -79,7 +81,7 @@ static char opt_rime_user_data_dir[512]  =  {0};
 static char opt_font[512] = XIM_RIME_DEFAULT_FONT;
 static char opt_fg_color[16] = XIM_RIME_DEFAULT_FG_COLOR;
 static char opt_bg_color[16] = XIM_RIME_DEFAULT_BG_COLOR;
-
+static char opt_trigger_keys[32] = XIM_RIME_DEFAULT_TRIGGER_KEYS;
 
 
 static uint32_t style_array[] = {
@@ -133,6 +135,7 @@ static void dump_config()
     log_printf("           deploy: %d", opt_deploy);
     log_printf("   share-data-dir: %s", opt_rime_share_data_dir);
     log_printf("    user-data-dir: %s", opt_rime_user_data_dir);
+    log_printf("     trigger-keys: %s", opt_trigger_keys);
     log_printf("             font: %s", opt_font);
     log_printf(" foreground-color: %s", opt_fg_color);
     log_printf(" background-color: %s", opt_bg_color);
@@ -526,6 +529,76 @@ static void handle_signal(int sig)
     }
 }
 
+static bool parse_trigger_keys(const char * trigger_key_str,
+                               xcb_im_trigger_keys_t * trigger_keys,
+                               xcb_im_ximtriggerkey_fr_t * trigger_key)
+{
+    const char * base_key = NULL;
+
+    /* Parse human-readable modifier combinations */
+    if (strcasestr(trigger_key_str, "Ctrl") || strcasestr(trigger_key_str, "Control")) {
+        trigger_key->modifier |= XCB_MOD_MASK_CONTROL;
+        trigger_key->modifier_mask |= XCB_MOD_MASK_CONTROL;
+        log_printf("found modifier Ctrl/Control");
+    }
+    if (strcasestr(trigger_key_str, "Shift")) {
+        trigger_key->modifier |= XCB_MOD_MASK_SHIFT;
+        trigger_key->modifier_mask |= XCB_MOD_MASK_SHIFT;
+        log_printf("found modifier Shift");
+    }
+    if (strcasestr(trigger_key_str, "Alt") || strcasestr(trigger_key_str, "Meta")) {
+        trigger_key->modifier |= XCB_MOD_MASK_1;
+        trigger_key->modifier_mask |= XCB_MOD_MASK_1;
+        log_printf("found modifier Alt/Meta");
+
+    }
+    if (strcasestr(trigger_key_str, "Super") || strcasestr(trigger_key_str, "Win") ||  strcasestr(trigger_key_str, "Command")) {
+        trigger_key->modifier |= XCB_MOD_MASK_4;
+        trigger_key->modifier_mask |= XCB_MOD_MASK_4;
+        log_printf("found modifier Super/Win/Command");
+
+    }
+
+    /* Parse the base keysym symbol component */
+    base_key = strrchr(trigger_key_str, '+');
+    if (!base_key) {
+        base_key = strrchr(trigger_key_str, '-');
+    }
+    if (base_key) {
+        base_key++; /* Advance past the '+' or '-' delimiter symbol */
+    } else {
+        base_key = trigger_key_str; /* No modifiers present, treat entire block as base key */
+    }
+
+    log_printf("parse basekey %s...", base_key);
+
+    
+    /* Map basic human-readable keywords to X11 Keysym definitions */
+    if (strcasecmp(base_key, "Space") == 0) {
+        trigger_key->keysym = XK_space; 
+        log_printf("found base key Space");        
+   } else if (strcasecmp(base_key, "Return") == 0 || strcasecmp(base_key, "Enter") == 0) {
+        trigger_key->keysym = XK_Return;
+        log_printf("found base key Return/Enter");        
+    } else if (strcasecmp(base_key, "Escape") == 0 || strcasecmp(base_key, "Esc") == 0) {
+        trigger_key->keysym = XK_Escape;
+        log_printf("found base key Escape/Esc");        
+    } else if (strlen(base_key) == 1) {
+        /* Direct alphanumeric character fallback mapping rules */
+        trigger_key->keysym = base_key[0];
+        log_printf("found base key %c", base_key[0]); 
+    } else {
+        /* Ultimate system-wide X11 string-to-keysym lookup fallback rule */
+        trigger_key->keysym = XStringToKeysym(base_key);
+        log_printf("found base key %c", trigger_key->keysym);
+    }
+    
+    /* Feed layout pointers cleanly back into the input method initializer tracking */
+    trigger_keys->nKeys = 1;
+    trigger_keys->keys = trigger_key;
+
+    return true;
+}
 
 int main(int argc, char *argv[])
 {
@@ -533,8 +606,8 @@ int main(int argc, char *argv[])
     int ret_value = 0;
     uint32_t win_candidat_mask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_OVERRIDE_REDIRECT;
     uint32_t win_candidat_values[3] = {0}; /* White background, black border elements */
-    xcb_im_trigger_keys_t trigger_keys;
-    xcb_im_ximtriggerkey_fr_t trigger_key;
+    xcb_im_trigger_keys_t trigger_keys = {0};
+    xcb_im_ximtriggerkey_fr_t trigger_key = {0};
     xcb_im_t *im = NULL;
     xcb_window_t w;
     xcb_generic_event_t *event = NULL;
@@ -542,7 +615,7 @@ int main(int argc, char *argv[])
 
     
     /* Parse command-line parameters arguments */    
-    while ((ch = getopt_long(argc, argv, "vhDSs:u:f:c:C:", longopts, NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "vhDSs:u:f:c:C:t:", longopts, NULL)) != -1) {
         switch (ch) {
         case 'v':
             opt_verbose = true;
@@ -576,6 +649,9 @@ int main(int argc, char *argv[])
             strncpy(opt_bg_color,  optarg, sizeof(opt_bg_color));
             opt_bg_color[sizeof(opt_bg_color) - 1] = 0;
             break;            
+        case 't':
+            strncpy(opt_trigger_keys, optarg, sizeof(opt_trigger_keys));
+            opt_trigger_keys[sizeof(opt_trigger_keys) - 1] = 0;
         }
     }
 
@@ -695,13 +771,14 @@ int main(int argc, char *argv[])
     sig_bridge.conn = server_state.conn;
     sig_bridge.win  = server_state.win_candidate;
 
-    
+    /* Parse trigger key */
+    if(!parse_trigger_keys(opt_trigger_keys, &trigger_keys, &trigger_key)) {
+        log_printf("failed to parse hotkey string: %s", opt_trigger_keys);
+        ret_value = 1;
+        goto error;
+    }
+
     /* Bind the default input method toggle hotspot keys configuration (Control + Space layout) */
-    trigger_key.keysym = ' ';
-    trigger_key.modifier = 1 << 2;
-    trigger_key.modifier_mask = 1 << 2;
-    trigger_keys.nKeys = 1;
-    trigger_keys.keys = &trigger_key;
     server_state.key_symbols = xcb_key_symbols_alloc(server_state.conn);
     
     /* Instantiate xcb_im server management module node handle */
