@@ -19,7 +19,7 @@
 #include <time.h>
 #include <uthash.h> 
 
-#define XIM_RIME_VERSION_STRING    "1.0.1"
+#define XIM_RIME_VERSION_STRING    "1.0.2"
 #define XIM_RIME_XIM_NAME          "xim_rime"
 #define XIM_RIME_APP_NAME          "xim_rime"
 #define XIM_RIME_DISTRIBUTION_NAME "Rime"
@@ -282,7 +282,9 @@ static void hide_candidate_window(IMServerState *state, IMClientSession *session
 
 /* Draw the candidate window */
 #define XIM_RIME_MAX_CANDIDATES_STR_LEN (40960)
+#define XIM_RIME_MAX_PREEDIT_STR_LEN    (4096)
 static char candidates_str[XIM_RIME_MAX_CANDIDATES_STR_LEN];
+static char preedit_str[XIM_RIME_MAX_PREEDIT_STR_LEN];
 
 static void draw_candidate_window(IMServerState *state, IMClientSession *session,  RimeContext * context)
 {
@@ -291,22 +293,54 @@ static void draw_candidate_window(IMServerState *state, IMClientSession *session
     XGlyphInfo extents;
     XftDraw *draw = NULL;
     
-    int32_t i, w_w = 0, w_h = 0;
-    const char * preedit_str = context->composition.preedit;
+    int32_t i, w_w = 0, w_h = 0, preedit_len = 0;
+
+    /*  Compose preeit_str */
+    preedit_str[0] = 0;
+    if(context->composition.preedit) {
+        preedit_len = strlen(context->composition.preedit);
+        strncpy(preedit_str, context->composition.preedit, XIM_RIME_MAX_PREEDIT_STR_LEN - 1);
+        // add cursor
+        if( context->composition.cursor_pos < XIM_RIME_MAX_PREEDIT_STR_LEN - 1) {
+            for(i = preedit_len ; i > context->composition.cursor_pos ; i--) {
+                preedit_str[i] = preedit_str[i - 1];
+            }
+            preedit_str[context->composition.cursor_pos] = '|';
+        }
+        preedit_str[preedit_len + 1] = 0;
+        preedit_len ++;
+    }
+
+    /* Add page NO. */
+    if(context->menu.page_no &&  context->menu.page_size) {
+        if(preedit_len < XIM_RIME_MAX_PREEDIT_STR_LEN - 1) {
+            preedit_len += snprintf(preedit_str + preedit_len,
+                                    XIM_RIME_MAX_PREEDIT_STR_LEN - preedit_len,
+                                    "    [page: %d]",
+                                    context->menu.page_no);
+                }
+    }
     
     /* Fetch candidates string */
+    candidates_str[0] = 0;
     for (i = 0; i < context->menu.num_candidates && candidates_len < XIM_RIME_MAX_CANDIDATES_STR_LEN - 1; ++i) {
         candidate = context->menu.candidates[i];
         candidates_len += snprintf( candidates_str + candidates_len,
                                     XIM_RIME_MAX_CANDIDATES_STR_LEN - candidates_len,
                                     "%d.%s ", i + 1, candidate.text);
     }
+
     candidates_str[candidates_len] = 0;
 
-    log_printf("preedit_str %s", preedit_str ? preedit_str : "");
+    log_printf("preedit_str %s, cursor_pos %d, page_size %d, page_no %d, last %d", 
+               preedit_str, 
+               context->composition.cursor_pos,
+               context->menu.page_size,
+               context->menu.page_no,
+               context->menu.is_last_page);
     log_printf("candidates_str %s", candidates_str);
 
-    if(preedit_str == NULL && candidates_str[0] == 0) {
+    if(preedit_str[0] == 0 || candidates_str[0] == 0) {
         hide_candidate_window(state, session);
         return;
     }
@@ -317,7 +351,7 @@ static void draw_candidate_window(IMServerState *state, IMClientSession *session
     w_h = state->xft_font->height * 2 + 10;
     
     /* Calculate window width (w_w) */
-    if(preedit_str) {
+    if(preedit_str[0]) {
         XftTextExtentsUtf8(state->dpy, state->xft_font, (XftChar8 *)preedit_str, strlen(preedit_str), &extents);
         w_w = extents.xOff + 10; 
     }
@@ -340,7 +374,7 @@ static void draw_candidate_window(IMServerState *state, IMClientSession *session
                          DefaultColormap(state->dpy, state->screen_nbr));
     if(draw) {
         XftDrawRect(draw, &state->xft_bg, 0, 0, w_w, w_h);
-        if(preedit_str) {
+        if(preedit_str[0]) {
             XftDrawStringUtf8(draw, &state->xft_fg, state->xft_font, 5, state->xft_font->height - 5, (XftChar8 *)preedit_str, strlen(preedit_str));
         }
         if(candidates_str[0]) {
@@ -456,7 +490,7 @@ static void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context
         if (event->state & XCB_MOD_MASK_4)       rime_mask |= (1 << 6); /* Usually maps to Super/Command key */
 
         session->client_win = xcb_im_input_context_get_client_window(ic);
-        
+
         if(state->rime_api->process_key(session->rime_session_id, keycode, rime_mask)) {
 
             RIME_STRUCT_INIT(RimeCommit, commit); /* Initialize the commit structure correctly */
@@ -482,22 +516,6 @@ static void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context
                 /* Commit text is not ready yet, meaning user is still typing in composition stage */
                 /* Query the current composition context to fetch preedit text and candidate listing */
                 if (state->rime_api->get_context(session->rime_session_id, &context)) {
-                    if (context.composition.preedit) {
-                        log_printf("[composition preedit text]: %s", context.composition.preedit);
-                        log_printf("cursor offset: from %d to %d", context.composition.sel_start, context.composition.sel_end);
-                    }
-                    
-                    log_printf("[candidates menu] (%d items on current page):", context.menu.num_candidates);
-                    for (int i = 0; i < context.menu.num_candidates; ++i) {
-                        RimeCandidate candidate = context.menu.candidates[i];
-                        const char* select_label = (i == context.menu.highlighted_candidate_index) ? "-> " : "   ";
-                        log_printf("%s%d. %s (%s)", 
-                                   select_label, 
-                                   i + 1, 
-                                   candidate.text, 
-                                   candidate.comment ? candidate.comment : "");
-                    }
-                    log_printf("Is last page: %s", context.menu.is_last_page ? "Yes" : "No");
 
                     /* Draw candidate window UI */
                     draw_candidate_window(state, session, &context);
