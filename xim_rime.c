@@ -19,7 +19,7 @@
 #include <time.h>
 #include <uthash.h> 
 
-#define XIM_RIME_VERSION_STRING    "1.0.2"
+#define XIM_RIME_VERSION_STRING    "1.0.3"
 #define XIM_RIME_XIM_NAME          "xim_rime"
 #define XIM_RIME_APP_NAME          "xim_rime"
 #define XIM_RIME_DISTRIBUTION_NAME "Rime"
