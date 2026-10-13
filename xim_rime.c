@@ -50,6 +50,7 @@ typedef struct _IMServerState {
     RimeTraits rime_traits;     /* Rime Traits configuration */
     IMClientSession * sessions;
     xcb_key_symbols_t *key_symbols;
+    bool win_candidate_showed;
 } IMServerState;
 
 /* Options descriptor */
@@ -277,6 +278,7 @@ static void hide_candidate_window(IMServerState *state, IMClientSession *session
     xcb_configure_window(state->conn, state->win_candidate, config_mask, config_values);
     xcb_unmap_window(state->conn, state->win_candidate);
     xcb_flush(state->conn);
+    state->win_candidate_showed = false;
 }
 
 
@@ -344,6 +346,8 @@ static void draw_candidate_window(IMServerState *state, IMClientSession *session
         hide_candidate_window(state, session);
         return;
     }
+
+    state->win_candidate_showed = true;
 
     /* Record the current active client */
     state->current_client = session->client;
@@ -524,10 +528,17 @@ static void callback(xcb_im_t *im, xcb_im_client_t *client, xcb_im_input_context
                     state->rime_api->free_context(&context);
                 }
             } 
-        } else if (hdr->major_opcode == XCB_XIM_UNSET_IC_FOCUS && session) {
-            hide_candidate_window(state, session);
         } else {
             xcb_im_forward_event(im, ic, event);
+        }
+    } else if (hdr->major_opcode == XCB_XIM_UNSET_IC_FOCUS && session) {
+        log_printf("XCB_XIM_UNSET_IC_FOCUS, should hide candidate window!");
+        hide_candidate_window(state, session);
+    } else if (hdr->major_opcode == XCB_XIM_TRIGGER_NOTIFY && session){
+        if(state->win_candidate_showed) {
+            log_printf("XCB_XIM_TRIGGER_NOTIFY, should hide candidate window!");
+            hide_candidate_window(state, session);
+            state->rime_api->clear_composition(session->rime_session_id);
         }
     }
 
